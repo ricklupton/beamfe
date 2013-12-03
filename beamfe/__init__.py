@@ -18,10 +18,15 @@ class BeamFE(object):
         self.M = np.zeros((N_dof, N_dof))
         self.K = np.zeros((N_dof, N_dof))
         self.F = np.zeros((N_dof, N_dof))
+
+        # Only average EA and GJ matters
+        avgEA = self.EA.mean(axis=1)
+        avgGJ = self.GJ.mean(axis=1)
+
         for i_el in range(N_nodes - 1):
             elem_length = x[i_el+1] - x[i_el]
             ke = self.element_stiffness_matrix(
-                self.EA[i_el, 0], self.EA[i_el, 1],
+                avgEA[i_el], avgGJ[i_el],
                 self.EIy[i_el, 0], self.EIy[i_el, 1],
                 self.EIz[i_el, 0], self.EIz[i_el, 1],
                 elem_length
@@ -85,24 +90,24 @@ class BeamFE(object):
         #      l*(-7*r1 - 15*r2)/420, 0, 0, 0, l**2*(r1/280 + r2/168)]])
         return e
 
-    def element_stiffness_matrix(self, EA_1, EA_2, EIy_1, EIy_2, EIz_1, EIz_2, l):
+    def element_stiffness_matrix(self, EA, GJ, EIy_1, EIy_2, EIz_1, EIz_2, l):
         """
         Finite element stiffness matrix, assuming cubic shape functions and
         linear stiffness variation.
         """
         e = array([
-            [(EA_1 + EA_2)/(2*l), 0, 0, 0, 0, 0, -(EA_1 + EA_2)/(2*l), 0, 0, 0, 0, 0],
-            [0, 6*(EIy_1 + EIy_2)/l**3, 0, 0, 0, 2*(2*EIy_1 + EIy_2)/l**2, 0, -6*(EIy_1 + EIy_2)/l**3, 0, 0, 0, 2*(EIy_1 + 2*EIy_2)/l**2],
-            [0, 0, 6*(EIz_1 + EIz_2)/l**3, 0, -2*(2*EIz_1 + EIz_2)/l**2, 0, 0, 0, -6*(EIz_1 + EIz_2)/l**3, 0, -2*(EIz_1 + 2*EIz_2)/l**2, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, -2*(2*EIz_1 + EIz_2)/l**2, 0, (3*EIz_1 + EIz_2)/l, 0, 0, 0, 2*(2*EIz_1 + EIz_2)/l**2, 0, (EIz_1 + EIz_2)/l, 0],
-            [0, 2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, (3*EIy_1 + EIy_2)/l, 0, -2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, (EIy_1 + EIy_2)/l],
-            [-(EA_1 + EA_2)/(2*l), 0, 0, 0, 0, 0, (EA_1 + EA_2)/(2*l), 0, 0, 0, 0, 0],
-            [0, -6*(EIy_1 + EIy_2)/l**3, 0, 0, 0, -2*(2*EIy_1 + EIy_2)/l**2, 0, 6*(EIy_1 + EIy_2)/l**3, 0, 0, 0, -2*(EIy_1 + 2*EIy_2)/l**2],
-            [0, 0, -6*(EIz_1 + EIz_2)/l**3, 0, 2*(2*EIz_1 + EIz_2)/l**2, 0, 0, 0, 6*(EIz_1 + EIz_2)/l**3, 0, 2*(EIz_1 + 2*EIz_2)/l**2, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, -2*(EIz_1 + 2*EIz_2)/l**2, 0, (EIz_1 + EIz_2)/l, 0, 0, 0, 2*(EIz_1 + 2*EIz_2)/l**2, 0, (EIz_1 + 3*EIz_2)/l, 0],
-            [0, 2*(EIy_1 + 2*EIy_2)/l**2, 0, 0, 0, (EIy_1 + EIy_2)/l, 0, -2*(EIy_1 + 2*EIy_2)/l**2, 0, 0, 0, (EIy_1 + 3*EIy_2)/l]
+            [EA/l, 0, 0, 0, 0, 0, -EA/l, 0, 0, 0, 0, 0],
+            [0, 6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, 2*(2*EIz_1 + EIz_2)/l**2, 0, -6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, 2*(EIz_1 + 2*EIz_2)/l**2],
+            [0, 0, 6*(EIy_1 + EIy_2)/l**3, 0, -2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, -6*(EIy_1 + EIy_2)/l**3, 0, -2*(EIy_1 + 2*EIy_2)/l**2, 0],
+            [0, 0, 0, GJ/l, 0, 0, 0, 0, 0, -GJ/l, 0, 0],
+            [0, 0, -2*(2*EIy_1 + EIy_2)/l**2, 0, (3*EIy_1 + EIy_2)/l, 0, 0, 0, 2*(2*EIy_1 + EIy_2)/l**2, 0, (EIy_1 + EIy_2)/l, 0],
+            [0, 2*(2*EIz_1 + EIz_2)/l**2, 0, 0, 0, (3*EIz_1 + EIz_2)/l, 0, -2*(2*EIz_1 + EIz_2)/l**2, 0, 0, 0, (EIz_1 + EIz_2)/l],
+            [-EA/l, 0, 0, 0, 0, 0, EA/l, 0, 0, 0, 0, 0],
+            [0, -6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, -2*(2*EIz_1 + EIz_2)/l**2, 0, 6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, -2*(EIz_1 + 2*EIz_2)/l**2],
+            [0, 0, -6*(EIy_1 + EIy_2)/l**3, 0, 2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, 6*(EIy_1 + EIy_2)/l**3, 0, 2*(EIy_1 + 2*EIy_2)/l**2, 0],
+            [0, 0, 0, -GJ/l, 0, 0, 0, 0, 0, GJ/l, 0, 0],
+            [0, 0, -2*(EIy_1 + 2*EIy_2)/l**2, 0, (EIy_1 + EIy_2)/l, 0, 0, 0, 2*(EIy_1 + 2*EIy_2)/l**2, 0, (EIy_1 + 3*EIy_2)/l, 0],
+            [0, 2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + EIz_2)/l, 0, -2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + 3*EIz_2)/l]])
         ])
         return e
 
