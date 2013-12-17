@@ -1,16 +1,18 @@
 import numpy as np
-from numpy import array, ix_, zeros, dot, eye
+from numpy import array, ix_, zeros, dot, eye, cos, sin
 from scipy import linalg
 
 
 class BeamFE(object):
-    def __init__(self, x, density, EA, EIy, EIz):
+    def __init__(self, x, density, EA, EIy, EIz, GJ=0, twist=0):
         assert x[0] == 0
         self.x = x
         self.density = self._prepare_inputs(len(x), density)
         self.EA = self._prepare_inputs(len(x), EA)
+        self.GJ = self._prepare_inputs(len(x), GJ)
         self.EIy = self._prepare_inputs(len(x), EIy)
         self.EIz = self._prepare_inputs(len(x), EIz)
+        self.twist = self._prepare_inputs(len(x), twist)
 
         # Assemble matrices
         N_nodes = len(x)
@@ -19,9 +21,10 @@ class BeamFE(object):
         self.K = np.zeros((N_dof, N_dof))
         self.F = np.zeros((N_dof, N_dof))
 
-        # Only average EA and GJ matters
+        # Only average EA and GJ matters; assume average twist is ok
         avgEA = self.EA.mean(axis=1)
         avgGJ = self.GJ.mean(axis=1)
+        avgTw = self.twist.mean(axis=1)
 
         for i_el in range(N_nodes - 1):
             elem_length = x[i_el+1] - x[i_el]
@@ -36,10 +39,16 @@ class BeamFE(object):
                 elem_length
             )
             fe = self.element_distributed_force_matrix(elem_length)
+
+            # Transform from local element to global coordinates (twist)
+            w = avgTw[i_el]
+            rot = array([[1, 0, 0], [0, cos(w), sin(w)], [0, -sin(w), cos(w)]])
+            T = linalg.block_diag(rot, rot, rot, rot)
+
             i1, i2 = i_el * 6, (i_el + 2) * 6
-            self.M[i1:i2, i1:i2] += me
-            self.K[i1:i2, i1:i2] += ke
-            self.F[i1:i2, i1:i2] += fe
+            self.M[i1:i2, i1:i2] += dot(T.T, dot(me, T))
+            self.K[i1:i2, i1:i2] += dot(T.T, dot(ke, T))
+            self.F[i1:i2, i1:i2] += dot(T.T, dot(fe, T))
 
     def _prepare_inputs(self, n, input):
         # If only one set of density values is given, assume it's continuous.
@@ -107,7 +116,7 @@ class BeamFE(object):
             [0, 0, -6*(EIy_1 + EIy_2)/l**3, 0, 2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, 6*(EIy_1 + EIy_2)/l**3, 0, 2*(EIy_1 + 2*EIy_2)/l**2, 0],
             [0, 0, 0, -GJ/l, 0, 0, 0, 0, 0, GJ/l, 0, 0],
             [0, 0, -2*(EIy_1 + 2*EIy_2)/l**2, 0, (EIy_1 + EIy_2)/l, 0, 0, 0, 2*(EIy_1 + 2*EIy_2)/l**2, 0, (EIy_1 + 3*EIy_2)/l, 0],
-            [0, 2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + EIz_2)/l, 0, -2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + 3*EIz_2)/l]])
+            [0, 2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + EIz_2)/l, 0, -2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + 3*EIz_2)/l]
         ])
         return e
 
@@ -201,6 +210,14 @@ class BeamFE(object):
         return Xi
 
     @property
+    def total_mass(self):
+        # There must be a better way of doing this? XXX
+        test = np.zeros(self.M.shape[0])
+        test[0::6] = 1
+        mass = dot(test.T, dot(self.M, test))
+        return mass
+
+    @property
     def K_BI(self):
         idx_B = zeros(self.K.shape[0], dtype=bool)
         idx_B[:6] = idx_B[-6:] = True
@@ -236,3 +253,16 @@ class BeamFE(object):
         x = zeros(len(self.K))
         x[idx] = linalg.solve(K, F[idx])
         return x
+
+    def modal_matrices(self, n_modes=None,
+                       clamped_left=True, clamped_right=True,
+                       exclude_axial=True, exclude_torsion=True):
+        """
+        Shortcut which calculates normal mode shapes, limited to the first
+        ``n_modes`` modes if required, and returns modal mass and stiffness.
+        """
+        w, shapes = self.normal_modes(n_modes, clamped_left, clamped_right,
+                                      exclude_axial, exclude_torsion)
+        modalM = dot(shapes.T, dot(self.M, shapes))
+        modalK = dot(shapes.T, dot(self.K, shapes))
+        return modalM, modalK
