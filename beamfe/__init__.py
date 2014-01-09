@@ -1,54 +1,97 @@
 import numpy as np
 from numpy import array, ix_, zeros, dot, eye, cos, sin
 from scipy import linalg
+from . import tapered_beam_element_integrals
+from . import tapered_beam_element_integrals as integrals
+
+
+def boundary_condition_vector(condition):
+    types = {
+        'C': [True, True, True, True, True, True],
+        'P': [True, True, True, False, False, False],
+        'F': [False, False, False, False, False, False],
+    }
+    try:
+        return types[condition]
+    except KeyError as e:
+        raise ValueError("Unknown boundary condition: '{}'".format(condition))
 
 
 class BeamFE(object):
     def __init__(self, x, density, EA, EIy, EIz, GJ=0, twist=0):
         assert x[0] == 0
-        self.x = x
-        self.density = self._prepare_inputs(len(x), density)
-        self.EA = self._prepare_inputs(len(x), EA)
-        self.GJ = self._prepare_inputs(len(x), GJ)
-        self.EIy = self._prepare_inputs(len(x), EIy)
-        self.EIz = self._prepare_inputs(len(x), EIz)
-        self.twist = self._prepare_inputs(len(x), twist)
-
-        # Assemble matrices
         N_nodes = len(x)
         N_dof = N_nodes * 6
-        self.M = np.zeros((N_dof, N_dof))
+
+        density = self._prepare_inputs(N_nodes, density)
+        EA = self._prepare_inputs(N_nodes, EA)
+        GJ = self._prepare_inputs(N_nodes, GJ)
+        EIy = self._prepare_inputs(N_nodes, EIy)
+        EIz = self._prepare_inputs(N_nodes, EIz)
+        twist = self._prepare_inputs(N_nodes, twist)
+
+        # Set undeformed nodal coordinates - along x axis
+        self.q0 = np.zeros(N_dof)
+        self.q0[0::6] = x
+
+        # Assemble shape integrals and stiffness & force matrices
+        self.mass = 0.0
+        self.S1 = np.zeros((3, N_dof))
+        self.S2 = np.zeros((3, 3, N_dof, N_dof))
+        self.F1 = np.zeros((3, N_dof))
+        self.F2 = np.zeros((3, 3, N_dof, N_dof))
         self.K = np.zeros((N_dof, N_dof))
-        self.F = np.zeros((N_dof, N_dof))
 
         # Only average EA and GJ matters; assume average twist is ok
-        avgEA = self.EA.mean(axis=1)
-        avgGJ = self.GJ.mean(axis=1)
-        avgTw = self.twist.mean(axis=1)
+        avgEA = EA.mean(axis=1)
+        avgGJ = GJ.mean(axis=1)
+        avgTw = twist.mean(axis=1)
 
         for i_el in range(N_nodes - 1):
             elem_length = x[i_el+1] - x[i_el]
-            ke = self.element_stiffness_matrix(
+            ke = integrals.K(
+                elem_length,
                 avgEA[i_el], avgGJ[i_el],
-                self.EIy[i_el, 0], self.EIy[i_el, 1],
-                self.EIz[i_el, 0], self.EIz[i_el, 1],
-                elem_length
+                EIy[i_el, 0], EIy[i_el, 1],
+                EIz[i_el, 0], EIz[i_el, 1]
             )
-            me = self.element_mass_matrix(
-                self.density[i_el, 0], self.density[i_el, 1],
-                elem_length
-            )
-            fe = self.element_distributed_force_matrix(elem_length)
 
-            # Transform from local element to global coordinates (twist)
+            r1, r2 = density[i_el, :]
+            m = integrals.mass(elem_length, r1, r2)
+            S1 = integrals.S1(elem_length, r1, r2)
+            S2 = integrals.S2(elem_length, r1, r2)
+            F1 = integrals.F1(elem_length)
+            F2 = integrals.F2(elem_length)
+
+            # The angle is the rotation of the element coordinates
+            # about the X axis. So CX transforms from local element
+            # coordinates back to body coordinates, and is therefore
+            # an X-rotation through the negative of the angle.
             w = avgTw[i_el]
-            rot = array([[1, 0, 0], [0, cos(w), sin(w)], [0, -sin(w), cos(w)]])
-            T = linalg.block_diag(rot, rot, rot, rot)
+            CX = array([[1, 0, 0], [0, cos(w), -sin(w)], [0, sin(w), cos(w)]])
+            Cq = linalg.block_diag(CX, CX, CX, CX).T
 
             i1, i2 = i_el * 6, (i_el + 2) * 6
-            self.M[i1:i2, i1:i2] += dot(T.T, dot(me, T))
-            self.K[i1:i2, i1:i2] += dot(T.T, dot(ke, T))
-            self.F[i1:i2, i1:i2] += dot(T.T, dot(fe, T))
+            self.K[i1:i2, i1:i2] += dot(Cq.T, dot(ke, Cq))
+
+            self.mass += m
+            self.S1[:, i1:i2] += dot(CX, dot(S1, Cq))
+            self.F1[:, i1:i2] += dot(CX, dot(F1, Cq))
+            for i in range(3):
+                for j in range(3):
+                    self.S2[i, j, i1:i2, i1:i2] += dot(Cq.T, dot(S2[i][j], Cq))
+                    self.F2[i, j, i1:i2, i1:i2] += dot(Cq.T, dot(F2[i][j], Cq))
+
+        self.M = np.trace(self.S2)
+        self.F = np.trace(self.F2)
+
+        # Boundary conditions: clamped-clamped by default
+        self.Bbound = np.zeros(self.K.shape[0], dtype=bool)
+        self.set_boundary_conditions('C', 'C')
+
+        # Included DOFs
+        self.Bdof = np.ones(self.K.shape[0], dtype=bool)
+        self.set_dofs([False, True, True, False, True, True])
 
     def _prepare_inputs(self, n, input):
         # If only one set of density values is given, assume it's continuous.
@@ -68,201 +111,129 @@ class BeamFE(object):
         else:
             raise ValueError('input should be Nx x 1 or Nx x 2')
 
-    def element_mass_matrix(self, rho_1, rho_2, l):
+    def set_boundary_conditions(self, left=None, right=None):
+        """left and right are one of F, C or P:
+         - F = free
+         - C = clamped
+         - P = pinned
         """
-        Finite element mass matrix, assuming cubic shape functions and
-        linear density variation from ``r1`` to ``r2``.
-        """
-        e = array([[l*(rho_1/4 + rho_2/12), 0, 0, 0, 0, 0, l*(rho_1/12 + rho_2/12), 0, 0, 0, 0, 0], [0, l*(2*rho_1/7 + 3*rho_2/35), 0, 0, 0, l**2*(15*rho_1 + 7*rho_2)/420, 0, l*(9*rho_1/140 + 9*rho_2/140), 0, 0, 0, l**2*(-7*rho_1 - 6*rho_2)/420], [0, 0, l*(2*rho_1/7 + 3*rho_2/35), 0, l**2*(-15*rho_1 - 7*rho_2)/420, 0, 0, 0, l*(9*rho_1/140 + 9*rho_2/140), 0, l**2*(7*rho_1 + 6*rho_2)/420, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, l**2*(-15*rho_1 - 7*rho_2)/420, 0, l**3*(rho_1/168 + rho_2/280), 0, 0, 0, l**2*(-6*rho_1 - 7*rho_2)/420, 0, l**3*(-rho_1 - rho_2)/280, 0], [0, l**2*(15*rho_1 + 7*rho_2)/420, 0, 0, 0, l**3*(rho_1/168 + rho_2/280), 0, l**2*(6*rho_1 + 7*rho_2)/420, 0, 0, 0, l**3*(-rho_1 - rho_2)/280], [l*(rho_1/12 + rho_2/12), 0, 0, 0, 0, 0, l*(rho_1/12 + rho_2/4), 0, 0, 0, 0, 0], [0, l*(9*rho_1/140 + 9*rho_2/140), 0, 0, 0, l**2*(6*rho_1 + 7*rho_2)/420, 0, l*(3*rho_1/35 + 2*rho_2/7), 0, 0, 0, l**2*(-7*rho_1 - 15*rho_2)/420], [0, 0, l*(9*rho_1/140 + 9*rho_2/140), 0, l**2*(-6*rho_1 - 7*rho_2)/420, 0, 0, 0, l*(3*rho_1/35 + 2*rho_2/7), 0, l**2*(7*rho_1 + 15*rho_2)/420, 0], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0, 0, l**2*(7*rho_1 + 6*rho_2)/420, 0, l**3*(-rho_1 - rho_2)/280, 0, 0, 0, l**2*(7*rho_1 + 15*rho_2)/420, 0, l**3*(rho_1/280 + rho_2/168), 0], [0, l**2*(-7*rho_1 - 6*rho_2)/420, 0, 0, 0, l**3*(-rho_1 - rho_2)/280, 0, l**2*(-7*rho_1 - 15*rho_2)/420, 0, 0, 0, l**3*(rho_1/280 + rho_2/168)]])
-        # e = array([
-        #     [r1/4 + r2/12, 0, 0, 0, 0, 0,
-        #      r1/12 + r2/12, 0, 0, 0, 0, 0],
-        #     [0, 2*r1/7 + 3*r2/35, 0, 0, 0, l*(15*r1 + 7*r2)/420,
-        #      0, 9*r1/140 + 9*r2/140, 0, 0, 0, l*(-7*r1 - 6*r2)/420],
-        #     [0, 0, 2*r1/7 + 3*r2/35, 0, l*(-15*r1 - 7*r2)/420, 0,
-        #      0, 0, 9*r1/140 + 9*r2/140, 0, l*(7*r1 + 6*r2)/420, 0],
-        #     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        #     [0, 0, l*(-15*r1 - 7*r2)/420, 0, l**2*(r1/168 + r2/280), 0,
-        #      0, 0, l*(-6*r1 - 7*r2)/420, 0, l**2*(-r1 - r2)/280, 0],
-        #     [0, l*(15*r1 + 7*r2)/420, 0, 0, 0, l**2*(r1/168 + r2/280),
-        #      0, l*(6*r1 + 7*r2)/420, 0, 0, 0, l**2*(-r1 - r2)/280],
-        #     [r1/12 + r2/12, 0, 0, 0, 0, 0,
-        #      r1/12 + r2/4, 0, 0, 0, 0, 0],
-        #     [0, 9*r1/140 + 9*r2/140, 0, 0, 0, l*(6*r1 + 7*r2)/420,
-        #      0, 3*r1/35 + 2*r2/7, 0, 0, 0, l*(-7*r1 - 15*r2)/420],
-        #     [0, 0, 9*r1/140 + 9*r2/140, 0, l*(-6*r1 - 7*r2)/420, 0,
-        #      0, 0, 3*r1/35 + 2*r2/7, 0, l*(7*r1 + 15*r2)/420, 0],
-        #     [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        #     [0, 0, l*(7*r1 + 6*r2)/420, 0, l**2*(-r1 - r2)/280, 0,
-        #      0, 0, l*(7*r1 + 15*r2)/420, 0, l**2*(r1/280 + r2/168), 0],
-        #     [0, l*(-7*r1 - 6*r2)/420, 0, 0, 0, l**2*(-r1 - r2)/280, 0,
-        #      l*(-7*r1 - 15*r2)/420, 0, 0, 0, l**2*(r1/280 + r2/168)]])
-        return e
+        if left is not None:
+            self.Bbound[:6] = boundary_condition_vector(left)
+        if right is not None:
+            self.Bbound[-6:] = boundary_condition_vector(right)
 
-    def element_stiffness_matrix(self, EA, GJ, EIy_1, EIy_2, EIz_1, EIz_2, l):
-        """
-        Finite element stiffness matrix, assuming cubic shape functions and
-        linear stiffness variation.
-        """
-        e = array([
-            [EA/l, 0, 0, 0, 0, 0, -EA/l, 0, 0, 0, 0, 0],
-            [0, 6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, 2*(2*EIz_1 + EIz_2)/l**2, 0, -6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, 2*(EIz_1 + 2*EIz_2)/l**2],
-            [0, 0, 6*(EIy_1 + EIy_2)/l**3, 0, -2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, -6*(EIy_1 + EIy_2)/l**3, 0, -2*(EIy_1 + 2*EIy_2)/l**2, 0],
-            [0, 0, 0, GJ/l, 0, 0, 0, 0, 0, -GJ/l, 0, 0],
-            [0, 0, -2*(2*EIy_1 + EIy_2)/l**2, 0, (3*EIy_1 + EIy_2)/l, 0, 0, 0, 2*(2*EIy_1 + EIy_2)/l**2, 0, (EIy_1 + EIy_2)/l, 0],
-            [0, 2*(2*EIz_1 + EIz_2)/l**2, 0, 0, 0, (3*EIz_1 + EIz_2)/l, 0, -2*(2*EIz_1 + EIz_2)/l**2, 0, 0, 0, (EIz_1 + EIz_2)/l],
-            [-EA/l, 0, 0, 0, 0, 0, EA/l, 0, 0, 0, 0, 0],
-            [0, -6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, -2*(2*EIz_1 + EIz_2)/l**2, 0, 6*(EIz_1 + EIz_2)/l**3, 0, 0, 0, -2*(EIz_1 + 2*EIz_2)/l**2],
-            [0, 0, -6*(EIy_1 + EIy_2)/l**3, 0, 2*(2*EIy_1 + EIy_2)/l**2, 0, 0, 0, 6*(EIy_1 + EIy_2)/l**3, 0, 2*(EIy_1 + 2*EIy_2)/l**2, 0],
-            [0, 0, 0, -GJ/l, 0, 0, 0, 0, 0, GJ/l, 0, 0],
-            [0, 0, -2*(EIy_1 + 2*EIy_2)/l**2, 0, (EIy_1 + EIy_2)/l, 0, 0, 0, 2*(EIy_1 + 2*EIy_2)/l**2, 0, (EIy_1 + 3*EIy_2)/l, 0],
-            [0, 2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + EIz_2)/l, 0, -2*(EIz_1 + 2*EIz_2)/l**2, 0, 0, 0, (EIz_1 + 3*EIz_2)/l]
-        ])
-        return e
+    def set_dofs(self, dofs):
+        if len(dofs) != 6:
+            raise ValueError("dofs should be 6-long list of bools")
+        assert dofs[0] is False and dofs[3] is False        # XXX
+        for i, dof_enabled in enumerate(dofs):
+            self.Bdof[i::6] = dof_enabled
 
-    def element_distributed_force_matrix(self, l):
-        """
-        Distributed force matrix F, so generalised forces are
-        F*[fx1, fy1, fz1, fx2, fy2, fz2]
-        """
-        F = zeros((12, 12))
-        F[:, 0:3] = [
-            [20*l, 0, 0],
-            [0, 21*l, 0],
-            [0, 0, 21*l],
-            [0, 0, 0],
-            [0, 0, -3*l**2],
-            [0, 3*l**2, 0],
-            [10*l, 0, 0],
-            [0, 9*l, 0],
-            [0, 0, 9*l],
-            [0, 0, 0],
-            [0, 0, 2*l**2],
-            [0, -2*l**2, 0]
-        ]
-        F[:, 6:9] = [
-            [10*l, 0, 0],
-            [0, 9*l, 0],
-            [0, 0, 9*l],
-            [0, 0, 0],
-            [0, 0, -2*l**2],
-            [0, 2*l**2, 0],
-            [20*l, 0, 0],
-            [0, 21*l, 0],
-            [0, 0, 21*l],
-            [0, 0, 0],
-            [0, 0, 3*l**2],
-            [0, -3*l**2, 0]
-        ]
-        return F / 60
+    @property
+    def K_II(self):
+        # Pick out interior (I) and boundary (B) coordinates
+        I = self.Bdof & ~self.Bbound
+        return self.K[I, :][:, I]
 
-    def normal_modes(self, n_modes=None, clamped_left=True, clamped_right=True,
-                     exclude_axial=True, exclude_torsion=True):
+    @property
+    def K_IB(self):
+        # Pick out interior (I) and boundary (B) coordinates
+        I = self.Bdof & ~self.Bbound
+        B = self.Bdof & self.Bbound
+        return self.K[I, :][:, B]
+
+    @property
+    def K_BB(self):
+        # Pick out interior (I) and boundary (B) coordinates
+        B = self.Bdof & self.Bbound
+        return self.K[B, :][:, B]
+
+    def normal_modes(self, n_modes=None):
         """
         Calculate the normal mode shapes and frequencies, limited to the first
         ``n_modes`` modes if required.
         """
-        assert exclude_axial and exclude_torsion
 
-        # remove axial/torsion
-        idx = [i for i in range(len(self.K)) if (i % 6) not in (0, 3)]
-
-        # take away ends if clamped
-        if clamped_left:
-            idx = idx[4:]
-        if clamped_right:
-            idx = idx[:-4]
-
-        w, v = linalg.eig(self.K[ix_(idx, idx)], self.M[ix_(idx, idx)])
+        # Select interior nodes
+        I = self.Bdof & ~self.Bbound
+        w, v = linalg.eig(self.K_II, self.M[I, :][:, I])
         order = np.argsort(w)
         w = np.sqrt(w[order].real)
-        v = v[:, order]
-
-        # put back axial/torsion as zeros
-        shapes = zeros((len(self.K), v.shape[1]))
-        shapes[idx, :] = v
-
+        vall = np.zeros((len(I), v.shape[1]))
+        vall[I, :] = v[:, order]
         if n_modes is not None:
             w = w[:n_modes]
-            shapes = shapes[:, :n_modes]
-        return w, shapes
+            vall = vall[:, :n_modes]
+        return w, vall
 
-    def attachment_modes(self, exclude_axial=True, exclude_torsion=True):
+    def attachment_modes(self):
         """
         Calculate the mode shapes with unit deflection at the ends of the beam
         """
-        assert exclude_axial and exclude_torsion
+        # Pick out interior (I) and boundary (B) coordinates
+        I = self.Bdof & ~self.Bbound
+        B = self.Bdof & self.Bbound
 
-        N = self.K.shape[0]
-
-        # remove axial/torsion
-        idx_ok = array([(i % 6) != 3 for i in range(N)])
-        #idx_ok = np.ones(N, dtype=bool)
-        idx_B = zeros(N, dtype=bool)
-        idx_B[:6] = idx_B[-6:] = True
-        K_II = self.K[idx_ok & ~idx_B, :][:, idx_ok & ~idx_B]
-        K_IB = self.K[idx_ok & ~idx_B, :][:, idx_ok & idx_B]
-
-        # Attachment modes
-        Xi = zeros((N, 12))
-        Xi[ix_(idx_ok & ~idx_B, idx_ok[:12])] = -dot(linalg.inv(K_II), K_IB)
-        Xi[ix_(idx_ok & idx_B,  idx_ok[:12])] = eye(sum(idx_ok[:12]))
+        # Calculate attachment modes
+        attach_modes = -dot(linalg.inv(self.K[I, :][:, I]), self.K[I, :][:, B])
+        num_boundary_dofs = sum(self.Bbound)
+        Xi = zeros((len(I), num_boundary_dofs))
+        Xi[ix_(I, self.Bdof[:num_boundary_dofs])] = attach_modes
+        Xi[ix_(B, self.Bdof[:num_boundary_dofs])] = eye(num_boundary_dofs)
         return Xi
 
-    @property
-    def total_mass(self):
-        # There must be a better way of doing this? XXX
-        test = np.zeros(self.M.shape[0])
-        test[0::6] = 1
-        mass = dot(test.T, dot(self.M, test))
-        return mass
-
-    @property
-    def K_BI(self):
-        idx_B = zeros(self.K.shape[0], dtype=bool)
-        idx_B[:6] = idx_B[-6:] = True
-        return self.K[idx_B, :][:, ~idx_B]
-
-    @property
-    def M_BI(self):
-        idx_B = zeros(self.K.shape[0], dtype=bool)
-        idx_B[:6] = idx_B[-6:] = True
-        return self.M[idx_B, :][:, ~idx_B]
-
-    def static_deflection(self, f, clamped_left=True, clamped_right=True,
-                          exclude_axial=True, exclude_torsion=True):
-        """Calculate static deflection under given distributed load `f`."""
-        assert exclude_axial and exclude_torsion
-
-        # remove axial/torsion
-        idx = [i for i in range(len(self.K)) if (i % 6) not in (0, 3)]
-
-        # take away ends if clamped
-        if clamped_left:
-            idx = idx[4:]
-        if clamped_right:
-            idx = idx[:-4]
-
-        # reduced stiffness matrix, excluding clamped ends and axial/torsion
-        K = self.K[ix_(idx, idx)]
-
+    def distribute_load_on_element(self, ielem, load):
         # generalised forces corresponding to applied distributed force
-        F = dot(self.F, f)
+        elem_length = self.q0[6*(ielem+1)] - self.q0[6*ielem]
+        F2 = integrals.F2(elem_length)
+        Fmat = np.trace(F2)
+        QF = zeros(self.F.shape[0])
+        QF[6*ielem:6*(ielem+2)] = dot(Fmat, load)
+        return QF
 
-        # solve for deflection
+    def static_deflection(self, Q=None):
+        """Calculate static deflection under given distributed load `F` and
+        nodal loads `Q`.
+        """
+        # reduced stiffness matrix, excluding clamped ends and axial/torsion
+        I = self.Bdof & ~self.Bbound
+        B = self.Bdof & self.Bbound
+
+        # Applied nodal forces
+        if Q is None:
+            Q = zeros(self.F.shape[0])
+        assert Q.shape == (self.F.shape[0], )
+
+        # solve for deflection, using only the free DOFs
+        # (assume prescribed DOFs are 0, so they don't appear here)
         x = zeros(len(self.K))
-        x[idx] = linalg.solve(K, F[idx])
-        return x
+        x[I] = linalg.solve(self.K_II, Q[I])
 
-    def modal_matrices(self, n_modes=None,
-                       clamped_left=True, clamped_right=True,
-                       exclude_axial=True, exclude_torsion=True):
+        # solve for boundary forces
+        P = zeros(len(self.K))
+        P[B] = -Q[B] + dot(self.K_IB.T, x[I])
+        return x, P
+
+    def modal_matrices(self, n_modes=None):
+        return ModalBeamFE(self, n_modes)
+
+
+class ModalBeamFE:
+    def __init__(self, fe, n_modes=None):
+        """Calculate normal mode shapes, limited to the first ``n_modes``
+        modes if required.
+
         """
-        Shortcut which calculates normal mode shapes, limited to the first
-        ``n_modes`` modes if required, and returns modal mass and stiffness.
-        """
-        w, shapes = self.normal_modes(n_modes, clamped_left, clamped_right,
-                                      exclude_axial, exclude_torsion)
-        modalM = dot(shapes.T, dot(self.M, shapes))
-        modalK = dot(shapes.T, dot(self.K, shapes))
-        return modalM, modalK
+
+        self.fe = fe
+        w, shapes = fe.normal_modes(n_modes)
+        self.w = w
+        self.shapes = shapes
+
+        # Calculate projected matrices
+        self.M = dot(shapes.T, dot(fe.M, shapes))
+        self.K = dot(shapes.T, dot(fe.K, shapes))
+        self.S1 = dot(fe.S1, shapes)
+        self.F1 = fe.F1
+        self.S2 = np.einsum('ap, ijab, bq -> ijpq', shapes, fe.S2, shapes)
+        self.F2 = np.einsum('ap, ijab     -> ijpb', shapes, fe.F2)
