@@ -18,7 +18,8 @@ def boundary_condition_vector(condition):
 
 
 class BeamFE(object):
-    def __init__(self, x, density, EA, EIy, EIz, GJ=0, twist=0):
+    def __init__(self, x, density, EA, EIy, EIz, GJ=0, twist=0,
+                 axial_force=None):
         assert x[0] == 0
         N_nodes = len(x)
         N_dof = N_nodes * 6
@@ -29,6 +30,12 @@ class BeamFE(object):
         EIy = self._prepare_inputs(N_nodes, EIy)
         EIz = self._prepare_inputs(N_nodes, EIz)
         twist = self._prepare_inputs(N_nodes, twist)
+
+        if axial_force is None:
+            axial_force = np.zeros(N_nodes)
+        else:
+            axial_force = np.asarray(axial_force)
+            assert axial_force.shape == (N_nodes,)
 
         # Set undeformed nodal coordinates - along x axis
         self.q0 = np.zeros(N_dof)
@@ -41,6 +48,7 @@ class BeamFE(object):
         self.F1 = np.zeros((3, N_dof))
         self.F2 = np.zeros((3, 3, N_dof, N_dof))
         self.K = np.zeros((N_dof, N_dof))
+        self.Ks = np.zeros((N_dof, N_dof))
 
         # Only average EA and GJ matters; assume average twist is ok
         avgEA = EA.mean(axis=1)
@@ -55,6 +63,7 @@ class BeamFE(object):
                 EIy[i_el, 0], EIy[i_el, 1],
                 EIz[i_el, 0], EIz[i_el, 1]
             )
+            ks = (axial_force[i_el] + axial_force[i_el + 1]) / 2 * integrals.Ks(elem_length)
 
             r1, r2 = density[i_el, :]
             m = integrals.mass(elem_length, r1, r2)
@@ -73,6 +82,7 @@ class BeamFE(object):
 
             i1, i2 = i_el * 6, (i_el + 2) * 6
             self.K[i1:i2, i1:i2] += dot(Cq.T, dot(ke, Cq))
+            self.Ks[i1:i2, i1:i2] += dot(Cq.T, dot(ks, Cq))
 
             self.mass += m
             self.S1[:, i1:i2] += dot(CX, dot(S1, Cq))
@@ -133,20 +143,32 @@ class BeamFE(object):
     def K_II(self):
         # Pick out interior (I) and boundary (B) coordinates
         I = self.Bdof & ~self.Bbound
-        return self.K[I, :][:, I]
+        return (self.K + self.Ks)[I, :][:, I]
 
     @property
     def K_IB(self):
         # Pick out interior (I) and boundary (B) coordinates
         I = self.Bdof & ~self.Bbound
         B = self.Bdof & self.Bbound
-        return self.K[I, :][:, B]
+        return (self.K + self.Ks)[I, :][:, B]
 
     @property
     def K_BB(self):
         # Pick out interior (I) and boundary (B) coordinates
         B = self.Bdof & self.Bbound
-        return self.K[B, :][:, B]
+        return (self.K + self.Ks)[B, :][:, B]
+
+    @property
+    def S1B(self):
+        """S B2, i.e. with boundary dofs removed"""
+        I = self.Bdof & ~self.Bbound
+        return self.S1[:, I]
+
+    @property
+    def S2B(self):
+        """S2 B2, i.e. with boundary dofs removed"""
+        I = self.Bdof & ~self.Bbound
+        return self.S2[:, I]
 
     def normal_modes(self, n_modes=None):
         """
@@ -232,7 +254,7 @@ class ModalBeamFE:
 
         # Calculate projected matrices
         self.M = dot(shapes.T, dot(fe.M, shapes))
-        self.K = dot(shapes.T, dot(fe.K, shapes))
+        self.K = dot(shapes.T, dot(fe.K + fe.Ks, shapes))
         self.S1 = dot(fe.S1, shapes)
         self.F1 = fe.F1
         self.S2 = np.einsum('ap, ijab, bq -> ijpq', shapes, fe.S2, shapes)
