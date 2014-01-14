@@ -29,7 +29,7 @@ class UniformCantilever_Test:
     def setup(self):
         x = np.linspace(0, self.length, 10)
         self.fe = BeamFE(x, self.density, 0, self.EI, self.EI)
-        self.fe.set_boundary_conditions(clamped_right=False)
+        self.fe.set_boundary_conditions('C', 'F')
         self.modal = ModalBeamFE(self.fe)
 
     def test_mass(self):
@@ -61,7 +61,8 @@ class UniformCantilever_Test:
     def test_deflection_under_uniform_load(self):
         # Simple uniform load should produce databook tip deflection
         w = 34.2  # N/m
-        defl, reactions = self.fe.static_deflection(transverse_load(10, magnitude=w))
+        Q = self.fe.distribute_load(transverse_load(10, magnitude=w))
+        defl, reactions = self.fe.static_deflection(Q)
         x, y, z = defl[0::6], defl[1::6], defl[2::6]
 
         assert_allclose(x, 0)
@@ -71,7 +72,8 @@ class UniformCantilever_Test:
     def test_deflection_is_parallel_to_uniform_loading(self):
         w = 67.4                  # distributed load (N/m)
         theta = np.radians(35.4)  # angle from y axis of load
-        defl, reactions = self.fe.static_deflection(transverse_load(10, w, theta))
+        Q = self.fe.distribute_load(transverse_load(10, w, theta))
+        defl, reactions = self.fe.static_deflection(Q)
         x, y, z = defl[0::6], defl[1::6], defl[2::6]
 
         assert_allclose(x, 0)
@@ -98,7 +100,7 @@ class UniformCantileverWithConstantTwist_Test:
         x = np.linspace(0, self.length, 10)
         self.fe = BeamFE(x, self.density, 0, self.EIy, self.EIz,
                          twist=self.twist)
-        self.fe.set_boundary_conditions(clamped_right=False)
+        self.fe.set_boundary_conditions('C', 'F')
         self.modal = ModalBeamFE(self.fe)
 
     def test_mass(self):
@@ -118,7 +120,8 @@ class UniformCantileverWithConstantTwist_Test:
 
     def test_deflection_under_uniform_load(self):
         w = 34.2  # N/m
-        defl, reactions = self.fe.static_deflection(transverse_load(10, w))
+        Q = self.fe.distribute_load(transverse_load(10, w))
+        defl, reactions = self.fe.static_deflection(Q)
         print(reactions)
         x, y, z = defl[0::6], defl[1::6], defl[2::6]
 
@@ -133,7 +136,7 @@ class UniformCantileverWithConstantTwist_Test:
         assert_allclose(y[-1], local_y * np.cos(tw) - local_z * np.sin(tw))
         assert_allclose(z[-1], local_z * np.cos(tw) + local_y * np.sin(tw))
 
-        assert_allclose(reactions[1], w * self.length)
+        assert_allclose(reactions[1], -w * self.length)
 
 
 class UniformCantileverWithLinearTwist_Test:
@@ -153,7 +156,7 @@ class UniformCantileverWithLinearTwist_Test:
         EIy = self.E * self.width * self.depth ** 3 / 12
         EIz = self.E * self.depth * self.width ** 3 / 12
         self.fe = BeamFE(x, 0, 0, EIy, EIz, twist=twist)
-        self.fe.set_boundary_conditions(clamped_right=False)
+        self.fe.set_boundary_conditions('C', 'F')
 
     def test_deflection_under_tip_load_y(self):
         Q = transverse_load(self.num_elements, magnitude=1, only_tip=True)
@@ -173,7 +176,7 @@ class ExampleBlade_Test:
         x, density, EA, EI_flap, EI_edge, twist = data.T
         # Twist has been saved in my convention (+ve X rotation), not Bladed
         self.fe = BeamFE(x, density, EA, EI_flap, EI_edge, twist=twist)
-        self.fe.set_boundary_conditions(clamped_right=False)
+        self.fe.set_boundary_conditions('C', 'F')
         self.modal = ModalBeamFE(self.fe)
         self.answers = np.load("tests/example_blade_mode_results.npz")
 

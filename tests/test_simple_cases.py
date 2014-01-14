@@ -3,7 +3,7 @@
 """
 
 import numpy as np
-from numpy import array, dot, zeros_like
+from numpy import array, dot, zeros_like, linspace
 from numpy.testing import assert_allclose
 
 from beamfe import BeamFE
@@ -97,7 +97,7 @@ class Example42_Test:
         assert_allclose(self.fe.K_IB, expected_IB)
 
     def test_distributed_load(self):
-        # Distributed force on first element:
+        # Distributed force on second element:
         load = array([0, 0, 0, 0, 0, 0, 0, 0, -100, 0, 0, 0])
         Q = self.fe.distribute_load_on_element(1, load)
         Q = Q[[2, 4, 8, 10, 14, 16]]
@@ -116,3 +116,21 @@ class Example42_Test:
         expected_deflections[[8, 10, 14, 16]] = array(
             [-1.6, 0.72, -7.108, 0.99]) * 1e4 / 143.0
         assert_allclose(deflections, expected_deflections, atol=1e1)
+
+
+# Eigenvalue problem
+class Example62_Test:
+    def setup(self):
+        x = linspace(0, 1, 16)
+        # Using the z axis as the transverse direction gives the same
+        # sign convention as Reddy uses in 2D, namely that rotations
+        # are positive clockwise.
+        self.fe = BeamFE(x, density=1, EA=0, EIy=1, EIz=0)
+        self.fe.set_boundary_conditions('C', 'F')
+        self.fe.set_dofs([False, False, True, False, True, False])
+
+    def test_mode_frequencies(self):
+        modal = self.fe.modal_matrices()
+        assert_allclose(modal.w[:4],
+                        [3.5160, 22.0345, 61.6972, 120.9019],
+                        atol=1e-1)
