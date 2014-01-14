@@ -86,11 +86,11 @@ class BeamFE(object):
 
             self.mass += m
             self.S1[:, i1:i2] += dot(CX, dot(S1, Cq))
-            self.F1[:, i1:i2] += dot(CX, dot(F1, Cq))
+            self.F1[:, i1:i2] += F1
             for i in range(3):
                 for j in range(3):
                     self.S2[i, j, i1:i2, i1:i2] += dot(Cq.T, dot(S2[i][j], Cq))
-                    self.F2[i, j, i1:i2, i1:i2] += dot(Cq.T, dot(F2[i][j], Cq))
+                    self.F2[i, j, i1:i2, i1:i2] += F2[i][j]
 
         self.M = np.trace(self.S2)
         self.F = np.trace(self.F2)
@@ -212,6 +212,14 @@ class BeamFE(object):
         QF = zeros(self.F.shape[0])
         QF[6*ielem:6*(ielem+2)] = dot(Fmat, load)
         return QF
+
+    def distribute_load(self, load):
+        """Return nodal forces for linearly varying distributed load"""
+        Q = np.zeros_like(self.q0)
+        for i in range(len(Q) // 6 - 1):
+            fi = load[(6 * i):(6 * (i + 2))]
+            Q += self.distribute_load_on_element(i, fi)
+        return Q
 
     def static_deflection(self, Q=None):
         """Calculate static deflection under given distributed load `F` and
