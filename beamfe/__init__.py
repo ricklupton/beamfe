@@ -1,5 +1,6 @@
 import numpy as np
 from numpy import array, ix_, zeros, dot, eye, cos, sin
+from numpy.lib.stride_tricks import as_strided
 from scipy import linalg
 from . import tapered_beam_element_integrals
 from . import tapered_beam_element_integrals as integrals
@@ -17,6 +18,40 @@ def boundary_condition_vector(condition):
         raise ValueError("Unknown boundary condition: '{}'".format(condition))
 
 
+def _prepare_inputs(n, input):
+    # If only one set of density values is given, assume it's continuous.
+    # Otherwise, values should be given at start and end of each section.
+    input = np.asarray(input)
+    if input.ndim == 0:
+        return input * np.ones((n - 1, 2))
+    elif input.ndim == 1:
+        assert input.shape[0] == n
+        yy = np.zeros((n - 1, 2))
+        yy[:, 0] = input[:-1]
+        yy[:, 1] = input[1:]
+        return yy
+    elif input.ndim == 2:
+        assert input.shape[0] == n - 1
+        return input
+    else:
+        raise ValueError('input should be Nx x 1 or Nx x 2')
+
+
+def interleave(x, n=None):
+    """Flattens x into a sequence of DOFs, where each location has `n`
+    DOFs. If `n` is not given, assume it from the number of colums in
+    `x`"""
+    if x.ndim < 2:
+        x = np.atleast_2d(x).T
+    assert x.ndim == 2
+    if n is None:
+        n = x.shape[1]
+    y = np.zeros(x.shape[0] * n)
+    for i in range(x.shape[1]):
+        y[i::n] = x[:, i]
+    return y
+
+
 class BeamFE(object):
     def __init__(self, x, density, EA, EIy, EIz, GJ=0, twist=0,
                  axial_force=None):
@@ -24,12 +59,12 @@ class BeamFE(object):
         N_nodes = len(x)
         N_dof = N_nodes * 6
 
-        density = self._prepare_inputs(N_nodes, density)
-        EA = self._prepare_inputs(N_nodes, EA)
-        GJ = self._prepare_inputs(N_nodes, GJ)
-        EIy = self._prepare_inputs(N_nodes, EIy)
-        EIz = self._prepare_inputs(N_nodes, EIz)
-        twist = self._prepare_inputs(N_nodes, twist)
+        density = _prepare_inputs(N_nodes, density)
+        EA = _prepare_inputs(N_nodes, EA)
+        GJ = _prepare_inputs(N_nodes, GJ)
+        EIy = _prepare_inputs(N_nodes, EIy)
+        EIz = _prepare_inputs(N_nodes, EIz)
+        twist = _prepare_inputs(N_nodes, twist)
 
         if axial_force is None:
             axial_force = np.zeros(N_nodes)
@@ -102,24 +137,6 @@ class BeamFE(object):
         # Included DOFs
         self.Bdof = np.ones(self.K.shape[0], dtype=bool)
         self.set_dofs([False, True, True, False, True, True])
-
-    def _prepare_inputs(self, n, input):
-        # If only one set of density values is given, assume it's continuous.
-        # Otherwise, values should be given at start and end of each section.
-        input = np.asarray(input)
-        if input.ndim == 0:
-            return input * np.ones((n - 1, 2))
-        elif input.ndim == 1:
-            assert input.shape[0] == n
-            yy = np.zeros((n - 1, 2))
-            yy[:, 0] = input[:-1]
-            yy[:, 1] = input[1:]
-            return yy
-        elif input.ndim == 2:
-            assert input.shape[0] == n - 1
-            return input
-        else:
-            raise ValueError('input should be Nx x 1 or Nx x 2')
 
     def set_boundary_conditions(self, left=None, right=None):
         """left and right are one of F, C or P:
@@ -247,9 +264,27 @@ class BeamFE(object):
     def modal_matrices(self, n_modes=None):
         return ModalBeamFE(self, n_modes)
 
+    @staticmethod
+    def centrifugal_force_distribution(qn, density):
+        """Calculates the distribution of axial forces at radii `r` when the
+        beam is rotating about an axis perpendicular to the beam
+        axis. Multiply by omega**2 to get the actual force.
+        """
+        N = len(qn) // 6
+        density = _prepare_inputs(N, density)
+        elem_lengths = np.diff(qn[0::6])
+        qn_chunks = as_strided(qn, shape=(len(qn) // 6 - 1, 12),
+                               strides=(6*qn.itemsize, qn.itemsize))
+        F = array([
+            dot(integrals.S1(l, rho[0], rho[1]), qn_el)[0]
+            for l, rho, qn_el in zip(elem_lengths, density, qn_chunks)
+        ])
+        return np.r_[np.cumsum(F[::-1])[::-1], 0]
+
 
 class ModalBeamFE:
     def __init__(self, fe, n_modes=None):
+
         """Calculate normal mode shapes, limited to the first ``n_modes``
         modes if required.
 
@@ -259,6 +294,7 @@ class ModalBeamFE:
         w, shapes = fe.normal_modes(n_modes)
         self.w = w
         self.shapes = shapes
+        self.damping = 0 * w
 
         # Calculate projected matrices
         self.M = dot(shapes.T, dot(fe.M, shapes))
