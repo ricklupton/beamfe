@@ -196,6 +196,8 @@ class BeamFE(object):
         # Subset of modes to calculate
         if n_modes is None:
             eigvals = None
+        elif n_modes == 0:
+            return np.empty((0,)), np.empty((len(self.M), 0))
         else:
             assert n_modes >= 1
             eigvals = (0, n_modes - 1)
