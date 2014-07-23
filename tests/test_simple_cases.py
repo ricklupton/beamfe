@@ -6,7 +6,7 @@ import numpy as np
 from numpy import array, dot, zeros_like, linspace
 from numpy.testing import assert_allclose
 
-from beamfe import BeamFE
+from beamfe import BeamFE, interleave
 
 
 class Example41_Test:
@@ -67,6 +67,16 @@ class Example41_Test:
         expected_reactions = zeros_like(reactions)
         expected_reactions[[2, 20, 22]] = [18565.54, 15434.46, 92164.83]
         assert_allclose(reactions, expected_reactions, atol=1e-2)
+
+    def test_load_matrix_gives_same_result_as_method(self):
+        # Distributed force on all elements
+        load = np.zeros(4 * 6)
+        load[2::6] = [350, 324, 654, 54]  # Z component
+
+        Q1 = self.fe.distribute_load(load)
+        Q2 = dot(self.fe.F, load)
+
+        assert_allclose(Q1, Q2)
 
 
 class Example42_Test:

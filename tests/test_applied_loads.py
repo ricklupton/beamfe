@@ -50,3 +50,6 @@ class AppliedLoads_Tests:
         ))
         Q = dot(I, load)
         assert_allclose(Q, [0, -f[2]*10/2 * 10*2/3, f[1]*10/2 * 10*2/3])
+
+        # Check stresses
+        assert_allclose(dot(self.fe.F, load), self.fe.distribute_load(load))

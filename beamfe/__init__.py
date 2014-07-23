@@ -46,7 +46,7 @@ def interleave(x, n=None):
     assert x.ndim == 2
     if n is None:
         n = x.shape[1]
-    y = np.zeros(x.shape[0] * n)
+    y = np.zeros(x.shape[0] * n, x.dtype)
     for i in range(x.shape[1]):
         y[i::n] = x[:, i]
     return y
@@ -226,13 +226,13 @@ class BeamFE(object):
         elem_length = self.q0[6*(ielem+1)] - self.q0[6*ielem]
         F2 = integrals.F2(elem_length)
         Fmat = np.trace(F2)
-        QF = zeros(self.F.shape[0])
+        QF = zeros(self.F.shape[0], dtype=load.dtype)
         QF[6*ielem:6*(ielem+2)] = dot(Fmat, load)
         return QF
 
     def distribute_load(self, load):
         """Return nodal forces for linearly varying distributed load"""
-        Q = np.zeros_like(self.q0)
+        Q = np.zeros_like(self.q0, dtype=load.dtype)
         for i in range(len(Q) // 6 - 1):
             fi = load[(6 * i):(6 * (i + 2))]
             Q += self.distribute_load_on_element(i, fi)
