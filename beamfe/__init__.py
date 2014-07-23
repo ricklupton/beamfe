@@ -193,16 +193,22 @@ class BeamFE(object):
         ``n_modes`` modes if required.
         """
 
-        # Select interior nodes
+        # Subset of modes to calculate
+        if n_modes is None:
+            eigvals = None
+        else:
+            assert n_modes >= 1
+            eigvals = (0, n_modes - 1)
+
+        # Select interior nodes and find eigenvalues; note eigh assumes symmetry
         I = self.Bdof & ~self.Bbound
-        w, v = linalg.eig(self.K_II, self.M[I, :][:, I])
-        order = np.argsort(w)
-        w = np.sqrt(w[order].real)
+        w, v = linalg.eigh(self.K_II, self.M[I, :][:, I], eigvals=eigvals)
+        w = np.sqrt(w.real)
+
+        # Reintroduce missing DOFs as zeros to keep shape consistent
         vall = np.zeros((len(I), v.shape[1]))
-        vall[I, :] = v[:, order]
-        if n_modes is not None:
-            w = w[:n_modes]
-            vall = vall[:, :n_modes]
+        vall[I, :] = v
+
         return w, vall
 
     def attachment_modes(self):
