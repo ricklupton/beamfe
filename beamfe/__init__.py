@@ -98,7 +98,8 @@ class BeamFE(object):
                 EIy[i_el, 0], EIy[i_el, 1],
                 EIz[i_el, 0], EIz[i_el, 1]
             )
-            ks = (axial_force[i_el] + axial_force[i_el + 1]) / 2 * integrals.Ks(elem_length)
+            ks = ((axial_force[i_el] + axial_force[i_el + 1]) / 2 *
+                  integrals.Ks(elem_length))
 
             r1, r2 = density[i_el, :]
             m = integrals.mass(elem_length, r1, r2)
@@ -157,37 +158,16 @@ class BeamFE(object):
             self.Bdof[i::6] = dof_enabled
 
     @property
-    def K_II(self):
-        # Pick out interior (I) and boundary (B) coordinates
-        I = self.Bdof & ~self.Bbound
-        return (self.K + self.Ks)[I, :][:, I]
+    def I(self):
+        "Interior (I) coordinate index"
+        return self.Bdof & ~self.Bbound
 
     @property
-    def K_IB(self):
-        # Pick out interior (I) and boundary (B) coordinates
-        I = self.Bdof & ~self.Bbound
-        B = self.Bdof & self.Bbound
-        return (self.K + self.Ks)[I, :][:, B]
+    def B(self):
+        "Boundary (B) coordinate index"
+        return self.Bdof & self.Bbound
 
-    @property
-    def K_BB(self):
-        # Pick out interior (I) and boundary (B) coordinates
-        B = self.Bdof & self.Bbound
-        return (self.K + self.Ks)[B, :][:, B]
-
-    @property
-    def S1B(self):
-        """S B2, i.e. with boundary dofs removed"""
-        I = self.Bdof & ~self.Bbound
-        return self.S1[:, I]
-
-    @property
-    def S2B(self):
-        """S2 B2, i.e. with boundary dofs removed"""
-        I = self.Bdof & ~self.Bbound
-        return self.S2[:, I]
-
-    def normal_modes(self, n_modes=None):
+    def normal_modes(self, n_modes=None, axial_force_scale=1.0):
         """
         Calculate the normal mode shapes and frequencies, limited to the first
         ``n_modes`` modes if required.
@@ -202,9 +182,11 @@ class BeamFE(object):
             assert n_modes >= 1
             eigvals = (0, n_modes - 1)
 
-        # Select interior nodes and find eigenvalues; note eigh assumes symmetry
-        I = self.Bdof & ~self.Bbound
-        w, v = linalg.eigh(self.K_II, self.M[I, :][:, I], eigvals=eigvals)
+        # Select interior nodes and find eigenvalues; note eigh
+        # assumes symmetry
+        I = self.I
+        K_II = self.K[I, :][:, I] + axial_force_scale * self.Ks[I, :][:, I]
+        w, v = linalg.eigh(K_II, self.M[I, :][:, I], eigvals=eigvals)
         w = np.sqrt(w.real)
 
         # Reintroduce missing DOFs as zeros to keep shape consistent
@@ -213,21 +195,30 @@ class BeamFE(object):
 
         return w, vall
 
-    def attachment_modes(self):
-        """
-        Calculate the mode shapes with unit deflection at the ends of the beam
+    def attachment_modes(self, axial_force_scale=1.0):
+        """Calculate the mode shapes with unit deflection at the ends of the
+        beam:
+
+        𝚵 = [  I              ]
+            [ -𝐊_II^{-1} 𝐊_IB ]
+
+        The result has the same number of rows as K, and the number of
+        columns corresponding to the number of boundary dofs which are
+        free. For example, with 2 freedoms per node, there will be 2
+        columns for a clamped-free beam and 4 columns for a
+        clamped-clamped beam.
         """
         # Pick out interior (I) and boundary (B) coordinates
         I = self.Bdof & ~self.Bbound
         B = self.Bdof & self.Bbound
 
         # Calculate attachment modes
-        attach_modes = -dot(linalg.inv(self.K[I, :][:, I]), self.K[I, :][:, B])
-        num_boundary_dofs = sum(self.Bbound)
-        Xi = zeros((len(I), num_boundary_dofs))
-        Xi[ix_(I, self.Bdof[:num_boundary_dofs])] = attach_modes
-        Xi[ix_(B, self.Bdof[:num_boundary_dofs])] = eye(num_boundary_dofs)
-        return Xi
+        K = self.K + axial_force_scale * self.Ks
+        attach_modes = -dot(linalg.inv(K[I, :][:, I]), K[I, :][:, B])
+        𝚵 = zeros((K.shape[0], attach_modes.shape[1]))
+        𝚵[B, :] = eye(𝚵.shape[1])
+        𝚵[I, :] = attach_modes
+        return 𝚵
 
     def distribute_load_on_element(self, ielem, load):
         # generalised forces corresponding to applied distributed force
@@ -246,13 +237,12 @@ class BeamFE(object):
             Q += self.distribute_load_on_element(i, fi)
         return Q
 
-    def static_deflection(self, Q=None):
+    def static_deflection(self, Q=None, axial_force_scale=1.0):
         """Calculate static deflection under given distributed load `F` and
         nodal loads `Q`.
         """
         # reduced stiffness matrix, excluding clamped ends and axial/torsion
-        I = self.Bdof & ~self.Bbound
-        B = self.Bdof & self.Bbound
+        I, B = self.I, self.B
 
         # Applied nodal forces
         if Q is None:
@@ -261,16 +251,18 @@ class BeamFE(object):
 
         # solve for deflection, using only the free DOFs
         # (assume prescribed DOFs are 0, so they don't appear here)
-        x = zeros(len(self.K))
-        x[I] = linalg.solve(self.K_II, Q[I])
+        K = self.K + axial_force_scale * self.Ks
+        x = zeros(len(K))
+        x[I] = linalg.solve(K[I, :][:, I], Q[I])
 
         # solve for boundary forces
-        P = zeros(len(self.K))
-        P[B] = -Q[B] + dot(self.K_IB.T, x[I])
+        P = zeros(len(K))
+        P[B] = -Q[B] + dot(K[I, :][:, B].T, x[I])
         return x, P
 
-    def modal_matrices(self, n_modes=None):
-        return ModalBeamFE(self, n_modes)
+    def modal_matrices(self, n_modes=None, attachment=False,
+                       axial_force_scale=1.0):
+        return ModalBeamFE(self, n_modes, attachment, axial_force_scale)
 
     @staticmethod
     def centrifugal_force_distribution(qn, density):
@@ -291,7 +283,8 @@ class BeamFE(object):
 
 
 class ModalBeamFE:
-    def __init__(self, fe, n_modes=None):
+    def __init__(self, fe, n_modes=None, attachment=False,
+                 axial_force_scale=1.0):
 
         """Calculate normal mode shapes, limited to the first ``n_modes``
         modes if required.
@@ -299,15 +292,27 @@ class ModalBeamFE:
         """
 
         self.fe = fe
-        w, shapes = fe.normal_modes(n_modes)
-        self.w = w
-        self.shapes = shapes
-        self.damping = 0 * w
+
+        # Get mode shapes
+        w, Phi = fe.normal_modes(n_modes)
+        if attachment:
+            Xi = fe.attachment_modes()
+        else:
+            Xi = np.empty((Phi.shape[0], 0))
+        self.shapes = shapes = np.c_[Xi, Phi]
 
         # Calculate projected matrices
         self.M = dot(shapes.T, dot(fe.M, shapes))
-        self.K = dot(shapes.T, dot(fe.K + fe.Ks, shapes))
+        self.K = dot(shapes.T, dot(fe.K + axial_force_scale * fe.Ks, shapes))
         self.S1 = dot(fe.S1, shapes)
         self.F1 = fe.F1
         self.S2 = np.einsum('ap, ijab, bq -> ijpq', shapes, fe.S2, shapes)
         self.F2 = np.einsum('ap, ijab     -> ijpb', shapes, fe.F2)
+
+        # Estimate a frequency for the attachment modes so it can be
+        # used for damping calculations.
+        Na = Xi.shape[1]
+        with np.errstate(invalid='ignore'):
+            wa = np.sqrt(np.diag(self.K)[:Na] / np.diag(self.M)[:Na])
+        self.w = np.r_[wa, w]
+        self.damping = 0 * self.w
