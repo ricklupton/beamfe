@@ -1,4 +1,7 @@
 *.pyc
 
 .ipynb_checkpoints
+.coverage
 
+/beamfe.egg-info/
+/cover/
