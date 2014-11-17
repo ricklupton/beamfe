@@ -1,16 +1,16 @@
 
 """Simple examples from Reddy1993
 """
-
+import unittest
 import numpy as np
 from numpy import array, dot, zeros_like, linspace
 from numpy.testing import assert_allclose
 
-from beamfe import BeamFE, interleave
+from beamfe import BeamFE
 
 
-class Example41_Test:
-    def setup(self):
+class TestBeamFE_Example41(unittest.TestCase):
+    def setUp(self):
         x = array([0.0, 10.0, 22.0, 28.0])
         EI = array([[2e7, 2e7],
                     [1e7, 1e7],
@@ -79,8 +79,8 @@ class Example41_Test:
         assert_allclose(Q1, Q2)
 
 
-class Example42_Test:
-    def setup(self):
+class TestBeamFE_Example42(unittest.TestCase):
+    def setUp(self):
         x = array([0.0, 4.0, 10.0])
         EI = 144.0
         # Using the z axis as the transverse direction gives the same
@@ -129,8 +129,8 @@ class Example42_Test:
 
 
 # Eigenvalue problem
-class Example62_Test:
-    def setup(self):
+class TestBeamFE_Example62(unittest.TestCase):
+    def setUp(self):
         x = linspace(0, 1, 16)
         # Using the z axis as the transverse direction gives the same
         # sign convention as Reddy uses in 2D, namely that rotations
